@@ -3,6 +3,10 @@ name: Telegram Userbot
 on:
   workflow_dispatch:
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   run-bot:
     runs-on: ubuntu-22.04
@@ -67,6 +71,8 @@ jobs:
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MINI_APP_PUBLIC_PATH: /mini-app/
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         shell: bash
         run: |
           set -euo pipefail
@@ -141,6 +147,55 @@ jobs:
           fi
 
           echo "Telegram Bot + Mini App + Watchdog are running."
+
+          # ==========================================
+          # AUTO RESTART SYSTEM
+          # Start next workflow after 5 hours 50 minutes
+          # ==========================================
+
+          echo "Auto-restart timer started."
+          echo "Next workflow will be triggered after 5 hours 50 minutes."
+
+          (
+            sleep 21000
+
+            echo "5 hours 50 minutes completed."
+            echo "Triggering next Telegram Userbot workflow..."
+
+            for attempt in 1 2 3 4 5; do
+              echo "Workflow trigger attempt $attempt..."
+
+              HTTP_CODE=$(curl -L \
+                -sS \
+                -o /tmp/workflow_dispatch_response.txt \
+                -w "%{http_code}" \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/bot.yml/dispatches" \
+                -d "{\"ref\":\"${GITHUB_REF_NAME}\"}" || true)
+
+              if [ "$HTTP_CODE" = "204" ]; then
+                echo "SUCCESS: Next workflow started."
+                break
+              fi
+
+              echo "Workflow trigger failed. HTTP status: $HTTP_CODE"
+              cat /tmp/workflow_dispatch_response.txt || true
+
+              if [ "$attempt" -lt 5 ]; then
+                echo "Retrying in 30 seconds..."
+                sleep 30
+              else
+                echo "ERROR: Could not trigger next workflow."
+              fi
+            done
+          ) &
+
+          # ==========================================
+          # CLOUDFLARE + BOT WATCHDOG
+          # ==========================================
 
           while true; do
             sleep 60
