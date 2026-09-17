@@ -7,6 +7,12 @@ permissions:
   actions: write
   contents: read
 
+concurrency:
+  group: telegram-userbot
+  cancel-in-progress: true
+
+jobs:
+
 jobs:
   run-bot:
     runs-on: ubuntu-22.04
