@@ -12,8 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-
-jobs:
   run-bot:
     runs-on: ubuntu-22.04
 
