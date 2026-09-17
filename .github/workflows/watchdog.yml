@@ -23,6 +23,10 @@ on:
 permissions:
   actions: write
   contents: read
+  
+concurrency:
+  group: telegram-userbot-watchdog
+  cancel-in-progress: true
 
 jobs:
   check-and-restart:
