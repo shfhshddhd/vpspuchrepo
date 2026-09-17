@@ -7,6 +7,7 @@ permissions:
   actions: write
   contents: read
 
+# Only ONE Telegram Userbot workflow can run at a time.
 concurrency:
   group: telegram-userbot
   cancel-in-progress: true
@@ -14,6 +15,9 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-22.04
+
+    # Keep the whole job below GitHub-hosted runner's 6-hour limit.
+    timeout-minutes: 359
 
     steps:
       - name: Checkout repository
@@ -25,13 +29,20 @@ jobs:
           python-version: "3.12"
 
       - name: Install system dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y ffmpeg curl
 
       - name: Install Python dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m pip install --upgrade pip
+
           pip install \
             aiohttp==3.11.11 \
             beautifulsoup4==4.12.3 \
@@ -75,14 +86,52 @@ jobs:
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MINI_APP_PUBLIC_PATH: /mini-app/
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 
         shell: bash
         run: |
           set -euo pipefail
 
+          CLOUDFLARED_PID=""
+          BOT_PID=""
+          TUNNEL_URL=""
+
+          # ==========================================
+          # CLEANUP
+          # ==========================================
+
+          cleanup() {
+            echo "=========================================="
+            echo "Cleanup started..."
+            echo "=========================================="
+
+            if [ -n "${BOT_PID:-}" ]; then
+              echo "Stopping Telegram Bot PID: $BOT_PID"
+
+              kill "$BOT_PID" 2>/dev/null || true
+              wait "$BOT_PID" 2>/dev/null || true
+            fi
+
+            if [ -n "${CLOUDFLARED_PID:-}" ]; then
+              echo "Stopping Cloudflare PID: $CLOUDFLARED_PID"
+
+              kill "$CLOUDFLARED_PID" 2>/dev/null || true
+              wait "$CLOUDFLARED_PID" 2>/dev/null || true
+            fi
+
+            echo "Cleanup completed."
+          }
+
+          trap cleanup EXIT INT TERM
+
+          # ==========================================
+          # START CLOUDFLARE
+          # ==========================================
+
           start_tunnel() {
             rm -f cloudflared.log
+
+            echo "Starting Cloudflare Quick Tunnel..."
 
             nohup ./cloudflared tunnel \
               --url http://127.0.0.1:8008 \
@@ -90,30 +139,69 @@ jobs:
 
             CLOUDFLARED_PID=$!
 
+            echo "Cloudflare PID: $CLOUDFLARED_PID"
+
             for i in {1..30}; do
-              TUNNEL_URL=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' cloudflared.log | head -n 1 || true)
+
+              TUNNEL_URL=$(
+                grep -oE \
+                  'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+                  cloudflared.log \
+                  | head -n 1 || true
+              )
 
               if [ -n "$TUNNEL_URL" ]; then
-                echo "New Tunnel URL: $TUNNEL_URL"
+                echo "=========================================="
+                echo "Cloudflare Tunnel is ONLINE"
+                echo "$TUNNEL_URL"
+                echo "=========================================="
+
                 return 0
               fi
 
               if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-                echo "Cloudflare tunnel process exited."
-                cat cloudflared.log
+                echo "Cloudflare Tunnel process exited."
+
+                cat cloudflared.log || true
+
                 return 1
               fi
 
               sleep 2
             done
 
-            echo "Could not get a new Cloudflare Tunnel URL."
-            cat cloudflared.log
+            echo "Could not obtain Cloudflare Tunnel URL."
+
+            cat cloudflared.log || true
+
             return 1
           }
 
+          # ==========================================
+          # STOP CLOUDFLARE
+          # ==========================================
+
+          stop_tunnel() {
+            if [ -n "${CLOUDFLARED_PID:-}" ]; then
+
+              echo "Stopping Cloudflare PID: $CLOUDFLARED_PID"
+
+              kill "$CLOUDFLARED_PID" 2>/dev/null || true
+              wait "$CLOUDFLARED_PID" 2>/dev/null || true
+
+              CLOUDFLARED_PID=""
+            fi
+          }
+
+          # ==========================================
+          # START BOT
+          # ==========================================
+
           start_bot() {
-            echo "Starting Telegram Bot with:"
+            echo "=========================================="
+            echo "Starting Telegram Userbot..."
+            echo "=========================================="
+
             echo "MINI_APP_URL=$TUNNEL_URL"
 
             MINI_APP_URL="$TUNNEL_URL" \
@@ -122,16 +210,27 @@ jobs:
 
             BOT_PID=$!
 
+            echo "Telegram Bot PID: $BOT_PID"
+
             for i in {1..30}; do
+
               if curl -fsS --max-time 5 \
-                http://127.0.0.1:8008/mini-app/ > /dev/null; then
-                echo "Mini App is running."
+                http://127.0.0.1:8008/mini-app/ \
+                > /dev/null; then
+
+                echo "=========================================="
+                echo "Mini App is ONLINE"
+                echo "=========================================="
+
                 return 0
               fi
 
               if ! kill -0 "$BOT_PID" 2>/dev/null; then
-                echo "Bot process exited."
-                wait "$BOT_PID"
+
+                echo "Telegram Bot process exited unexpectedly."
+
+                wait "$BOT_PID" 2>/dev/null || true
+
                 return 1
               fi
 
@@ -139,100 +238,218 @@ jobs:
             done
 
             echo "Mini App did not become ready."
+
             return 1
           }
 
+          # ==========================================
+          # STOP BOT
+          # ==========================================
+
+          stop_bot() {
+            if [ -n "${BOT_PID:-}" ]; then
+
+              echo "Stopping Telegram Bot PID: $BOT_PID"
+
+              kill "$BOT_PID" 2>/dev/null || true
+              wait "$BOT_PID" 2>/dev/null || true
+
+              BOT_PID=""
+            fi
+          }
+
+          # ==========================================
+          # RESTART EVERYTHING
+          # ==========================================
+
+          restart_services() {
+            echo "=========================================="
+            echo "Restarting services..."
+            echo "=========================================="
+
+            stop_bot
+            stop_tunnel
+
+            sleep 3
+
+            if ! start_tunnel; then
+              echo "Failed to restart Cloudflare Tunnel."
+              return 1
+            fi
+
+            if ! start_bot; then
+              echo "Failed to restart Telegram Userbot."
+              return 1
+            fi
+
+            echo "=========================================="
+            echo "Recovery successful."
+            echo "=========================================="
+
+            return 0
+          }
+
+          # ==========================================
+          # INITIAL START
+          # ==========================================
+
+          echo "=========================================="
+          echo "Telegram Userbot starting..."
+          echo "=========================================="
+
           if ! start_tunnel; then
+            echo "Initial Cloudflare Tunnel startup failed."
             exit 1
           fi
 
           if ! start_bot; then
+            echo "Initial Telegram Userbot startup failed."
             exit 1
           fi
 
-          echo "Telegram Bot + Mini App + Watchdog are running."
+          echo "=========================================="
+          echo "TELEGRAM USERBOT IS ONLINE"
+          echo "=========================================="
 
           # ==========================================
-          # AUTO RESTART SYSTEM
-          # Start next workflow after 5 hours 50 minutes
+          # 5 HOURS 45 MINUTES SERVICE RUNTIME
+          #
+          # 5h45m = 20700 seconds
+          #
+          # This leaves time for:
+          # - checkout
+          # - Python setup
+          # - package installation
+          # - Cloudflare download
+          # - cleanup
+          #
+          # before GitHub's 6-hour hosted-runner limit.
           # ==========================================
 
-          echo "Auto-restart timer started."
-          echo "Next workflow will be triggered after 5 hours 50 minutes."
+          MAX_RUNTIME_SECONDS=20700
+          START_TIME=$(date +%s)
 
-          (
-            sleep 21000
+          echo "Automatic restart cycle:"
+          echo "5 hours 45 minutes service runtime."
 
-            echo "5 hours 50 minutes completed."
-            echo "Triggering next Telegram Userbot workflow..."
-
-            for attempt in 1 2 3 4 5; do
-              echo "Workflow trigger attempt $attempt..."
-
-              HTTP_CODE=$(curl -L \
-                -sS \
-                -o /tmp/workflow_dispatch_response.txt \
-                -w "%{http_code}" \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "X-GitHub-Api-Version: 2026-03-10" \
-                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/bot.yml/dispatches" \
-                -d "{\"ref\":\"${GITHUB_REF_NAME}\"}" || true)
-
-              if [ "$HTTP_CODE" = "204" ]; then
-                echo "SUCCESS: Next workflow started."
-                break
-              fi
-
-              echo "Workflow trigger failed. HTTP status: $HTTP_CODE"
-              cat /tmp/workflow_dispatch_response.txt || true
-
-              if [ "$attempt" -lt 5 ]; then
-                echo "Retrying in 30 seconds..."
-                sleep 30
-              else
-                echo "ERROR: Could not trigger next workflow."
-              fi
-            done
-          ) &
+          WATCHDOG_FAILURES=0
 
           # ==========================================
-          # CLOUDFLARE + BOT WATCHDOG
+          # MAIN WATCHDOG LOOP
           # ==========================================
 
           while true; do
+
             sleep 60
 
-            echo "Watchdog: checking Mini App and Cloudflare Tunnel..."
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
 
-            if curl -fsS --max-time 15 \
-              "$TUNNEL_URL/mini-app/" > /dev/null; then
-              echo "Watchdog: Mini App is healthy."
-              continue
+            echo "------------------------------------------"
+            echo "Watchdog check"
+            echo "Runtime: ${ELAPSED}s / ${MAX_RUNTIME_SECONDS}s"
+
+            # ========================================
+            # TIME LIMIT
+            # ========================================
+
+            if [ "$ELAPSED" -ge "$MAX_RUNTIME_SECONDS" ]; then
+
+              echo "=========================================="
+              echo "5 hours 45 minutes completed."
+              echo "Stopping current workflow cleanly."
+              echo "Watchdog workflow will start the next run."
+              echo "=========================================="
+
+              break
             fi
 
-            echo "Watchdog: Tunnel is DOWN. Creating a new tunnel..."
+            # ========================================
+            # CHECK CLOUDFLARED PROCESS
+            # ========================================
 
-            kill "$CLOUDFLARED_PID" 2>/dev/null || true
-            wait "$CLOUDFLARED_PID" 2>/dev/null || true
+            if [ -z "${CLOUDFLARED_PID:-}" ] || \
+               ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
 
-            if ! start_tunnel; then
-              echo "Watchdog: failed to create new tunnel."
-              continue
+              echo "Watchdog: Cloudflare process is DOWN."
+
+              WATCHDOG_FAILURES=$((WATCHDOG_FAILURES + 1))
+
+            # ========================================
+            # CHECK BOT PROCESS
+            # ========================================
+
+            elif [ -z "${BOT_PID:-}" ] || \
+                 ! kill -0 "$BOT_PID" 2>/dev/null; then
+
+              echo "Watchdog: Telegram Bot process is DOWN."
+
+              WATCHDOG_FAILURES=$((WATCHDOG_FAILURES + 1))
+
+            # ========================================
+            # CHECK LOCAL MINI APP
+            # ========================================
+
+            elif ! curl -fsS --max-time 15 \
+              http://127.0.0.1:8008/mini-app/ \
+              > /dev/null; then
+
+              echo "Watchdog: Local Mini App is DOWN."
+
+              WATCHDOG_FAILURES=$((WATCHDOG_FAILURES + 1))
+
+            # ========================================
+            # CHECK PUBLIC CLOUDFLARE URL
+            # ========================================
+
+            elif ! curl -fsS --max-time 15 \
+              "$TUNNEL_URL/mini-app/" \
+              > /dev/null; then
+
+              echo "Watchdog: Public Cloudflare Tunnel is DOWN."
+
+              WATCHDOG_FAILURES=$((WATCHDOG_FAILURES + 1))
+
+            else
+
+              WATCHDOG_FAILURES=0
+
+              echo "Watchdog: Everything is healthy."
+
             fi
 
-            echo "Watchdog: restarting bot with new Mini App URL..."
+            # ========================================
+            # RECOVER AFTER 2 FAILED CHECKS
+            # ========================================
 
-            kill "$BOT_PID" 2>/dev/null || true
-            wait "$BOT_PID" 2>/dev/null || true
+            if [ "$WATCHDOG_FAILURES" -ge 2 ]; then
 
-            sleep 3
+              echo "=========================================="
+              echo "Watchdog detected a service failure."
+              echo "Starting recovery..."
+              echo "=========================================="
 
-            if ! start_bot; then
-              echo "Watchdog: bot restart failed."
-              exit 1
+              if restart_services; then
+
+                WATCHDOG_FAILURES=0
+
+                echo "Watchdog: recovery successful."
+
+              else
+
+                echo "Watchdog: recovery failed."
+
+                WATCHDOG_FAILURES=0
+
+              fi
+
             fi
 
-            echo "Watchdog: recovery successful."
           done
+
+          echo "=========================================="
+          echo "Current workflow is shutting down."
+          echo "Next workflow will be started by Watchdog."
+          echo "=========================================="
+
+          exit 0
