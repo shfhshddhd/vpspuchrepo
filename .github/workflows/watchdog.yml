@@ -1,0 +1,145 @@
+name: Telegram Userbot Watchdog
+
+on:
+  # Immediate recovery when Telegram Userbot finishes,
+  # fails, or is cancelled.
+  workflow_run:
+    workflows:
+      - Telegram Userbot
+    types:
+      - completed
+    branches:
+      - clean-main
+
+  # Backup checker.
+  # If workflow_run somehow misses an event,
+  # this checks every 5 minutes.
+  schedule:
+    - cron: "*/5 * * * *"
+
+  # Manual testing.
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  check-and-restart:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check Telegram Userbot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BOT_WORKFLOW: bot.yml
+          BOT_BRANCH: clean-main
+
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Telegram Userbot Watchdog"
+          echo "=========================================="
+
+          sleep 10
+
+          echo "Checking active Telegram Userbot runs..."
+
+          RESPONSE=$(
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/runs?branch=$BOT_BRANCH&status=in_progress&per_page=20"
+          )
+
+          ACTIVE_COUNT=$(
+            echo "$RESPONSE" |
+            python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+runs = data.get("workflow_runs", [])
+print(len(runs))
+'
+          )
+
+          echo "Active Telegram Userbot runs: $ACTIVE_COUNT"
+
+          # ==========================================
+          # IF BOT IS ALREADY RUNNING
+          # ==========================================
+
+          if [ "$ACTIVE_COUNT" -gt 0 ]; then
+
+            echo "=========================================="
+            echo "Telegram Userbot is already running."
+            echo "No restart required."
+            echo "=========================================="
+
+            exit 0
+          fi
+
+          # ==========================================
+          # NO BOT RUNNING
+          # ==========================================
+
+          echo "=========================================="
+          echo "No active Telegram Userbot found."
+          echo "Starting a new workflow..."
+          echo "Branch: $BOT_BRANCH"
+          echo "=========================================="
+
+          for ATTEMPT in 1 2 3 4 5; do
+
+            echo "Dispatch attempt: $ATTEMPT / 5"
+
+            HTTP_CODE=$(
+              curl -L \
+                -sS \
+                -o /tmp/dispatch-response.txt \
+                -w "%{http_code}" \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/dispatches" \
+                -d "{\"ref\":\"$BOT_BRANCH\"}" \
+                || true
+            )
+
+            if [ "$HTTP_CODE" = "204" ]; then
+
+              echo "=========================================="
+              echo "SUCCESS"
+              echo "New Telegram Userbot workflow started."
+              echo "=========================================="
+
+              exit 0
+            fi
+
+            echo "Dispatch failed."
+            echo "HTTP status: $HTTP_CODE"
+
+            cat /tmp/dispatch-response.txt || true
+
+            if [ "$ATTEMPT" -lt 5 ]; then
+
+              echo "Retrying in 20 seconds..."
+
+              sleep 20
+
+            fi
+
+          done
+
+          echo "=========================================="
+          echo "ERROR"
+          echo "Could not start Telegram Userbot."
+          echo "=========================================="
+
+          exit 1
