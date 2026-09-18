@@ -1,8 +1,18 @@
 name: Telegram Userbot Watchdog
 
 on:
-  # Immediate recovery when Telegram Userbot finishes,
-  # fails, or is cancelled.
+
+  # ============================================================
+  # USERBOT WORKFLOW FINISHED
+  #
+  # अगर Userbot manually cancel हो जाए
+  # crash हो जाए
+  # timeout हो जाए
+  # या किसी और कारण से समाप्त हो जाए
+  #
+  # तो watchdog replacement start करेगा.
+  # ============================================================
+
   workflow_run:
     workflows:
       - Telegram Userbot
@@ -11,139 +21,448 @@ on:
     branches:
       - clean-main
 
-  # Backup checker.
-  # If workflow_run somehow misses an event,
-  # this checks every 5 minutes.
+  # ============================================================
+  # PERIODIC SAFETY CHECK
+  #
+  # हर 5 मिनट में check होगा.
+  # अगर किसी कारण workflow_run event miss हो गया
+  # तो भी Userbot वापस start हो सकेगा.
+  # ============================================================
+
   schedule:
     - cron: "*/5 * * * *"
 
-  # Manual testing.
+  # ============================================================
+  # MANUAL WATCHDOG TEST
+  # ============================================================
+
   workflow_dispatch:
+
+
+# ==============================================================
+# PERMISSIONS
+# ==============================================================
 
 permissions:
   actions: write
   contents: read
-  
+
+
+# ==============================================================
+# WATCHDOG JOB
+#
+# यहां cancel-in-progress TRUE नहीं है.
+#
+# अगर दो watchdog events एक साथ आएं तो दोनों को आपस में
+# cancel नहीं किया जाएगा.
+# हर watchdog पहले active Userbot check करेगा.
+# ==============================================================
+
 concurrency:
   group: telegram-userbot-watchdog
-  cancel-in-progress: true
+  cancel-in-progress: false
+
 
 jobs:
-  check-and-restart:
+
+  check-and-recover:
+
     runs-on: ubuntu-22.04
 
+    timeout-minutes: 10
+
     steps:
-      - name: Check Telegram Userbot
+
+      # ========================================================
+      # CHECK USERBOT
+      # ========================================================
+
+      - name: Check and recover Telegram Userbot
         env:
+
           GH_TOKEN: ${{ github.token }}
+
           REPOSITORY: ${{ github.repository }}
+
           BOT_WORKFLOW: bot.yml
+
           BOT_BRANCH: clean-main
 
+          API_VERSION: "2026-03-10"
+
         shell: bash
+
         run: |
+
           set -euo pipefail
+
+
+          # ======================================================
+          # BASIC INFORMATION
+          # ======================================================
 
           echo "=========================================="
           echo "Telegram Userbot Watchdog"
           echo "=========================================="
+          echo "Repository : $REPOSITORY"
+          echo "Workflow   : $BOT_WORKFLOW"
+          echo "Branch     : $BOT_BRANCH"
+          echo "Trigger    : ${{ github.event_name }}"
+          echo "=========================================="
 
-          sleep 10
 
-          echo "Checking active Telegram Userbot runs..."
+          # ======================================================
+          # GITHUB API HELPER
+          # ======================================================
 
-          RESPONSE=$(
+          github_api_get() {
+
             curl -fsSL \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/runs?branch=$BOT_BRANCH&status=in_progress&per_page=20"
-          )
+              -H "X-GitHub-Api-Version: $API_VERSION" \
+              "$@"
 
-          ACTIVE_COUNT=$(
-            echo "$RESPONSE" |
-            python3 -c '
+          }
+
+
+          # ======================================================
+          # GET ALL ACTIVE USERBOT RUNS
+          #
+          # Active means:
+          #
+          # queued
+          # in_progress
+          # waiting
+          # requested
+          # pending
+          #
+          # GitHub currently exposes these workflow run states.
+          # ======================================================
+
+          get_active_runs() {
+
+            github_api_get \
+              "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/runs?branch=$BOT_BRANCH&per_page=100" |
+              python3 -c '
+
 import json
 import sys
 
-data = json.load(sys.stdin)
-runs = data.get("workflow_runs", [])
-print(len(runs))
+ACTIVE = {
+    "queued",
+    "in_progress",
+    "waiting",
+    "requested",
+    "pending"
+}
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+for run in data.get("workflow_runs", []):
+
+    status = run.get("status")
+
+    if status in ACTIVE:
+
+        print(
+            f"{run.get(\"id\", \"\")} "
+            f"{status} "
+            f"{run.get(\"event\", \"\")} "
+            f"{run.get(\"created_at\", \"\")}"
+        )
 '
-          )
 
-          echo "Active Telegram Userbot runs: $ACTIVE_COUNT"
 
-          # ==========================================
-          # IF BOT IS ALREADY RUNNING
-          # ==========================================
+          }
+
+
+          # ======================================================
+          # GET ACTIVE RUN COUNT
+          # ======================================================
+
+          get_active_count() {
+
+            get_active_runs |
+              awk 'NF >= 2 {count++} END {print count+0}'
+
+          }
+
+
+          # ======================================================
+          # DISPATCH NEW USERBOT
+          #
+          # GitHub workflow_dispatch API returns the newly-created
+          # workflow run details.
+          #
+          # We pass empty handoff values because this is a normal
+          # watchdog recovery run.
+          #
+          # The bot itself will inspect older active runs and
+          # safely replace them only after health verification.
+          # ======================================================
+
+          start_userbot() {
+
+            local ATTEMPT
+
+            local RESPONSE_FILE="/tmp/userbot-dispatch.json"
+
+            local HTTP_CODE
+
+            local NEW_RUN_ID
+
+
+            for ATTEMPT in 1 2 3 4 5; do
+
+              echo "=========================================="
+              echo "Starting replacement Userbot"
+              echo "Attempt: $ATTEMPT / 5"
+              echo "=========================================="
+
+
+              HTTP_CODE="$(
+                curl -sS \
+                  -o "$RESPONSE_FILE" \
+                  -w "%{http_code}" \
+                  -X POST \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "X-GitHub-Api-Version: $API_VERSION" \
+                  -H "Content-Type: application/json" \
+                  "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/dispatches" \
+                  -d '{
+                    "ref": "clean-main",
+                    "return_run_details": true,
+                    "inputs": {
+                      "handoff_id": "",
+                      "previous_run_id": ""
+                    }
+                  }' \
+                  || true
+              )
+
+
+              echo "Dispatch HTTP status: $HTTP_CODE"
+
+
+              # ==================================================
+              # SUCCESS
+              # ==================================================
+
+              if [ "$HTTP_CODE" = "200" ]; then
+
+                NEW_RUN_ID="$(
+                  python3 -c '
+import json
+import sys
+
+try:
+
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    print(data.get("workflow_run_id", ""))
+
+except Exception:
+
+    print("")
+' "$RESPONSE_FILE"
+                )"
+
+
+                if [[ "$NEW_RUN_ID" =~ ^[0-9]+$ ]]; then
+
+                  echo "=========================================="
+                  echo "NEW USERBOT WORKFLOW STARTED"
+                  echo "=========================================="
+                  echo "Run ID: $NEW_RUN_ID"
+                  echo "=========================================="
+
+
+                  # ==============================================
+                  # WAIT UNTIL NEW RUN BECOMES ACTIVE
+                  # ==============================================
+
+                  for CHECK in {1..30}; do
+
+                    sleep 5
+
+
+                    STATUS="$(
+                      github_api_get \
+                        "https://api.github.com/repos/$REPOSITORY/actions/runs/$NEW_RUN_ID" |
+                      python3 -c '
+import json
+import sys
+
+try:
+    print(json.load(sys.stdin).get("status", "unknown"))
+except Exception:
+    print("unknown")
+'
+                    )
+
+
+                    echo "New Userbot status: $STATUS"
+
+
+                    case "$STATUS" in
+
+                      queued|in_progress|waiting|requested|pending)
+
+                        echo "=========================================="
+                        echo "USERBOT REPLACEMENT IS ACTIVE"
+                        echo "=========================================="
+
+                        return 0
+
+                        ;;
+
+
+                      completed)
+
+                        echo "Replacement completed unexpectedly."
+
+                        ;;
+
+                    esac
+
+                  done
+
+
+                  echo "New workflow was created but did not become active in time."
+
+                fi
+
+              fi
+
+
+              echo "Dispatch response:"
+
+              cat "$RESPONSE_FILE" || true
+
+
+              if [ "$ATTEMPT" -lt 5 ]; then
+
+                sleep 15
+
+              fi
+
+            done
+
+
+            echo "=========================================="
+            echo "FAILED TO START USERBOT"
+            echo "=========================================="
+
+            return 1
+
+          }
+
+
+          # ======================================================
+          # SMALL DELAY
+          #
+          # workflow_run event के तुरंत बाद GitHub API में run
+          # state update होने में थोड़ा समय लग सकता है.
+          # ======================================================
+
+          sleep 10
+
+
+          # ======================================================
+          # FIND ACTIVE USERBOT RUNS
+          # ======================================================
+
+          ACTIVE_RUNS="$(
+            get_active_runs || true
+          )"
+
+
+          ACTIVE_COUNT="$(
+            echo "$ACTIVE_RUNS" |
+            awk 'NF >= 2 {count++} END {print count+0}'
+          )"
+
+
+          echo "=========================================="
+          echo "ACTIVE USERBOT RUNS: $ACTIVE_COUNT"
+          echo "=========================================="
+
+
+          if [ -n "$ACTIVE_RUNS" ]; then
+
+            echo "$ACTIVE_RUNS"
+
+          else
+
+            echo "No active Userbot run found."
+
+          fi
+
+
+          # ======================================================
+          # CASE 1
+          #
+          # ONE OR MORE USERBOT RUNS ARE ACTIVE
+          #
+          # कुछ भी cancel नहीं करना.
+          #
+          # Current bot.yml खुद duplicate/handoff handling करता है.
+          # ======================================================
 
           if [ "$ACTIVE_COUNT" -gt 0 ]; then
 
             echo "=========================================="
-            echo "Telegram Userbot is already running."
-            echo "No restart required."
+            echo "USERBOT IS ALREADY ACTIVE"
+            echo "No new recovery run required."
             echo "=========================================="
 
             exit 0
+
           fi
 
-          # ==========================================
-          # NO BOT RUNNING
-          # ==========================================
+
+          # ======================================================
+          # CASE 2
+          #
+          # ZERO ACTIVE USERBOT RUNS
+          #
+          # इसका मतलब Userbot completely stopped है.
+          #
+          # अब replacement start करेंगे.
+          # ======================================================
 
           echo "=========================================="
-          echo "No active Telegram Userbot found."
-          echo "Starting a new workflow..."
-          echo "Branch: $BOT_BRANCH"
+          echo "NO ACTIVE USERBOT FOUND"
+          echo "Starting replacement..."
           echo "=========================================="
 
-          for ATTEMPT in 1 2 3 4 5; do
 
-            echo "Dispatch attempt: $ATTEMPT / 5"
+          if start_userbot; then
 
-            HTTP_CODE=$(
-              curl -L \
-                -sS \
-                -o /tmp/dispatch-response.txt \
-                -w "%{http_code}" \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "X-GitHub-Api-Version: 2026-03-10" \
-                "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/dispatches" \
-                -d "{\"ref\":\"$BOT_BRANCH\"}" \
-                || true
-            )
+            echo "=========================================="
+            echo "WATCHDOG RECOVERY SUCCESSFUL"
+            echo "=========================================="
 
-            if [ "$HTTP_CODE" = "204" ]; then
+            exit 0
 
-              echo "=========================================="
-              echo "SUCCESS"
-              echo "New Telegram Userbot workflow started."
-              echo "=========================================="
+          fi
 
-              exit 0
-            fi
 
-            echo "Dispatch failed."
-            echo "HTTP status: $HTTP_CODE"
-
-            cat /tmp/dispatch-response.txt || true
-
-            if [ "$ATTEMPT" -lt 5 ]; then
-
-              echo "Retrying in 20 seconds..."
-
-              sleep 20
-
-            fi
-
-          done
+          # ======================================================
+          # FINAL FAILURE
+          #
+          # Watchdog अगले scheduled check में फिर कोशिश करेगा.
+          # कोई historical workflow run delete नहीं किया जाता.
+          # ======================================================
 
           echo "=========================================="
-          echo "ERROR"
-          echo "Could not start Telegram Userbot."
+          echo "WATCHDOG COULD NOT START USERBOT"
           echo "=========================================="
 
           exit 1
