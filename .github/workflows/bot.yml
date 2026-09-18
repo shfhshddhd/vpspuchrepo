@@ -28,25 +28,13 @@ jobs:
 
     steps:
 
-      # ==========================================================
-      # CHECKOUT
-      # ==========================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # ==========================================================
-      # PYTHON
-      # ==========================================================
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      # ==========================================================
-      # SYSTEM DEPENDENCIES
-      # ==========================================================
 
       - name: Install system dependencies
         shell: bash
@@ -54,11 +42,11 @@ jobs:
           set -euo pipefail
 
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl
 
-      # ==========================================================
-      # PYTHON DEPENDENCIES
-      # ==========================================================
+          sudo apt-get install -y \
+            ffmpeg \
+            curl \
+            jq
 
       - name: Install Python dependencies
         shell: bash
@@ -86,13 +74,9 @@ jobs:
             replit==4.1.2 \
             requests==2.32.3 \
             rich==13.9.3 \
-            speedtest-cli==2.1.3 \
+            speedtest-cli==2.1.0 \
             Telethon==1.44.0 \
             yt-dlp==2026.8.19
-
-      # ==========================================================
-      # CLOUDFLARE QUICK TUNNEL
-      # ==========================================================
 
       - name: Download Cloudflare
         shell: bash
@@ -108,10 +92,6 @@ jobs:
 
           chmod +x cloudflared
 
-      # ==========================================================
-      # START USERBOT
-      # ==========================================================
-
       - name: Start Telegram Userbot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -120,7 +100,6 @@ jobs:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
           MINI_APP_PUBLIC_PATH: /mini-app/
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -134,7 +113,11 @@ jobs:
           REPOSITORY="${GITHUB_REPOSITORY}"
           BOT_WORKFLOW="bot.yml"
           BOT_BRANCH="clean-main"
+
           CURRENT_RUN_ID="${GITHUB_RUN_ID}"
+
+          HANDOFF_ID="${HANDOFF_ID:-}"
+          PREVIOUS_RUN_ID="${PREVIOUS_RUN_ID:-}"
 
           CLOUDFLARED_PID=""
           BOT_PID=""
@@ -145,21 +128,13 @@ jobs:
 
           MAX_RUNTIME_SECONDS=20700
 
-          # ========================================================
-          # GITHUB API
-          # ========================================================
-
           github_api_get() {
             curl -fsSL \
               -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               "$@"
           }
-
-          # ========================================================
-          # CLEANUP
-          # ========================================================
 
           cleanup() {
 
@@ -168,18 +143,14 @@ jobs:
             echo "=========================================="
 
             if [ -n "${BOT_PID:-}" ]; then
-
-              kill "$BOT_PID" 2>/dev/null || true
-              wait "$BOT_PID" 2>/dev/null || true
-
+              kill "${BOT_PID}" 2>/dev/null || true
+              wait "${BOT_PID}" 2>/dev/null || true
               BOT_PID=""
             fi
 
             if [ -n "${CLOUDFLARED_PID:-}" ]; then
-
-              kill "$CLOUDFLARED_PID" 2>/dev/null || true
-              wait "$CLOUDFLARED_PID" 2>/dev/null || true
-
+              kill "${CLOUDFLARED_PID}" 2>/dev/null || true
+              wait "${CLOUDFLARED_PID}" 2>/dev/null || true
               CLOUDFLARED_PID=""
             fi
 
@@ -187,10 +158,6 @@ jobs:
           }
 
           trap cleanup EXIT INT TERM
-
-          # ========================================================
-          # START CLOUDFLARE
-          # ========================================================
 
           start_tunnel() {
 
@@ -206,7 +173,7 @@ jobs:
 
             CLOUDFLARED_PID=$!
 
-            echo "Cloudflare PID: $CLOUDFLARED_PID"
+            echo "Cloudflare PID: ${CLOUDFLARED_PID}"
 
             for i in {1..45}; do
 
@@ -217,17 +184,17 @@ jobs:
                   | head -n 1 || true
               )"
 
-              if [ -n "$TUNNEL_URL" ]; then
+              if [ -n "${TUNNEL_URL}" ]; then
 
                 echo "=========================================="
                 echo "Cloudflare Tunnel ONLINE"
-                echo "$TUNNEL_URL"
+                echo "${TUNNEL_URL}"
                 echo "=========================================="
 
                 return 0
               fi
 
-              if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
 
                 echo "Cloudflare process exited."
 
@@ -247,24 +214,18 @@ jobs:
             return 1
           }
 
-          # ========================================================
-          # STOP CLOUDFLARE
-          # ========================================================
-
           stop_tunnel() {
 
             if [ -n "${CLOUDFLARED_PID:-}" ]; then
 
-              kill "$CLOUDFLARED_PID" 2>/dev/null || true
-              wait "$CLOUDFLARED_PID" 2>/dev/null || true
+              kill "${CLOUDFLARED_PID}" 2>/dev/null || true
+
+              wait "${CLOUDFLARED_PID}" 2>/dev/null || true
 
               CLOUDFLARED_PID=""
+
             fi
           }
-
-          # ========================================================
-          # START TELEGRAM USERBOT
-          # ========================================================
 
           start_bot() {
 
@@ -272,15 +233,15 @@ jobs:
             echo "Starting Telegram Userbot"
             echo "=========================================="
 
-            echo "MINI_APP_URL=$TUNNEL_URL"
+            echo "MINI_APP_URL=${TUNNEL_URL}"
 
-            MINI_APP_URL="$TUNNEL_URL" \
-            PYTHONPATH="$GITHUB_WORKSPACE/telegram_userbot" \
+            MINI_APP_URL="${TUNNEL_URL}" \
+            PYTHONPATH="${GITHUB_WORKSPACE}/telegram_userbot" \
             python -m telegram_userbot.main &
 
             BOT_PID=$!
 
-            echo "Telegram Userbot PID: $BOT_PID"
+            echo "Telegram Userbot PID: ${BOT_PID}"
 
             for i in {1..45}; do
 
@@ -296,11 +257,11 @@ jobs:
                 return 0
               fi
 
-              if ! kill -0 "$BOT_PID" 2>/dev/null; then
+              if ! kill -0 "${BOT_PID}" 2>/dev/null; then
 
                 echo "Telegram Userbot process exited."
 
-                wait "$BOT_PID" 2>/dev/null || true
+                wait "${BOT_PID}" 2>/dev/null || true
 
                 return 1
               fi
@@ -314,24 +275,18 @@ jobs:
             return 1
           }
 
-          # ========================================================
-          # STOP TELEGRAM USERBOT
-          # ========================================================
-
           stop_bot() {
 
             if [ -n "${BOT_PID:-}" ]; then
 
-              kill "$BOT_PID" 2>/dev/null || true
-              wait "$BOT_PID" 2>/dev/null || true
+              kill "${BOT_PID}" 2>/dev/null || true
+
+              wait "${BOT_PID}" 2>/dev/null || true
 
               BOT_PID=""
+
             fi
           }
-
-          # ========================================================
-          # RESTART SERVICES
-          # ========================================================
 
           restart_services() {
 
@@ -355,53 +310,33 @@ jobs:
             return 0
           }
 
-          # ========================================================
-          # CHECK RUN STATUS
-          # ========================================================
-
           get_run_status() {
 
             local RUN_ID="$1"
-            local DATA
 
-            DATA="$(
-              github_api_get \
-                "https://api.github.com/repos/$REPOSITORY/actions/runs/$RUN_ID" \
-                || true
-            )"
-
-            echo "$DATA" |
-              python3 -c '
-import json
-import sys
-
-try:
-    print(json.load(sys.stdin).get("status", "unknown"))
-except Exception:
-    print("unknown")
-'
+            github_api_get \
+              "https://api.github.com/repos/${REPOSITORY}/actions/runs/${RUN_ID}" \
+              | jq -r '.status // "unknown"'
           }
-
-          # ========================================================
-          # CANCEL RUN
-          # ========================================================
 
           cancel_run() {
 
             local RUN_ID="$1"
 
-            if ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
+            if ! [[ "${RUN_ID}" =~ ^[0-9]+$ ]]; then
               return 1
             fi
 
-            if [ "$RUN_ID" = "$CURRENT_RUN_ID" ]; then
+            if [ "${RUN_ID}" = "${CURRENT_RUN_ID}" ]; then
+
               echo "Refusing to cancel current run."
+
               return 1
             fi
 
             for ATTEMPT in 1 2 3 4 5; do
 
-              echo "Cancel attempt $ATTEMPT for run $RUN_ID"
+              echo "Cancel attempt ${ATTEMPT} for run ${RUN_ID}"
 
               HTTP_CODE="$(
                 curl -sS \
@@ -409,15 +344,16 @@ except Exception:
                   -w "%{http_code}" \
                   -X POST \
                   -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                   -H "X-GitHub-Api-Version: 2026-03-10" \
-                  "https://api.github.com/repos/$REPOSITORY/actions/runs/$RUN_ID/cancel" \
+                  "https://api.github.com/repos/${REPOSITORY}/actions/runs/${RUN_ID}/cancel" \
                   || true
               )"
 
-              if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "409" ]; then
+              if [ "${HTTP_CODE}" = "202" ] ||
+                 [ "${HTTP_CODE}" = "409" ]; then
 
-                echo "Cancellation accepted for run $RUN_ID"
+                echo "Cancellation accepted for run ${RUN_ID}"
 
                 return 0
               fi
@@ -431,65 +367,41 @@ except Exception:
             return 1
           }
 
-          # ========================================================
-          # FIND OLDER ACTIVE RUNS
-          #
-          # This prevents manually started duplicate runs from
-          # permanently creating multiple Userbot instances.
-          #
-          # The newest run becomes the replacement candidate.
-          # It verifies itself first, then cancels older runs.
-          # ========================================================
-
           find_older_active_runs() {
 
             github_api_get \
-              "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/runs?branch=$BOT_BRANCH&per_page=50" |
-              python3 -c '
-import json
-import sys
-
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-
-current = int(sys.argv[1])
-
-active = {
-    "queued",
-    "in_progress",
-    "waiting",
-    "requested",
-    "pending"
-}
-
-for run in data.get("workflow_runs", []):
-    rid = int(run.get("id", 0))
-    status = run.get("status")
-
-    if rid != current and rid < current and status in active:
-        print(rid)
-' "$CURRENT_RUN_ID"
+              "https://api.github.com/repos/${REPOSITORY}/actions/workflows/${BOT_WORKFLOW}/runs?branch=${BOT_BRANCH}&per_page=50" \
+              | jq -r \
+                --argjson current "${CURRENT_RUN_ID}" '
+                  .workflow_runs[]
+                  | select(
+                      (.id != $current)
+                      and
+                      (.id < $current)
+                      and
+                      (
+                        .status == "queued"
+                        or .status == "in_progress"
+                        or .status == "waiting"
+                        or .status == "requested"
+                        or .status == "pending"
+                      )
+                    )
+                  | .id
+                '
           }
-
-          # ========================================================
-          # INITIAL INFORMATION
-          # ========================================================
 
           echo "=========================================="
           echo "Telegram Userbot"
           echo "=========================================="
-          echo "Repository : $REPOSITORY"
-          echo "Branch     : $BOT_BRANCH"
-          echo "Current Run: $CURRENT_RUN_ID"
+
+          echo "Repository : ${REPOSITORY}"
+          echo "Branch     : ${BOT_BRANCH}"
+          echo "Current Run: ${CURRENT_RUN_ID}"
           echo "Handoff ID : ${HANDOFF_ID:-none}"
           echo "Previous   : ${PREVIOUS_RUN_ID:-none}"
-          echo "=========================================="
 
-          # ========================================================
-          # START CLOUDFLARE
-          # ========================================================
+          echo "=========================================="
 
           if ! start_tunnel; then
 
@@ -498,10 +410,6 @@ for run in data.get("workflow_runs", []):
             exit 1
           fi
 
-          # ========================================================
-          # START USERBOT
-          # ========================================================
-
           if ! start_bot; then
 
             echo "Initial Userbot startup failed."
@@ -509,24 +417,20 @@ for run in data.get("workflow_runs", []):
             exit 1
           fi
 
-          # ========================================================
-          # FINAL HEALTH VERIFICATION
-          # ========================================================
-
           echo "=========================================="
           echo "Final health verification"
           echo "=========================================="
 
           HEALTH_OK=1
 
-          if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+          if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
 
             echo "FAIL: Cloudflare process is down."
 
             HEALTH_OK=0
           fi
 
-          if ! kill -0 "$BOT_PID" 2>/dev/null; then
+          if ! kill -0 "${BOT_PID}" 2>/dev/null; then
 
             echo "FAIL: Userbot process is down."
 
@@ -545,7 +449,7 @@ for run in data.get("workflow_runs", []):
 
           if ! curl -fsS \
             --max-time 15 \
-            "$TUNNEL_URL/mini-app/" \
+            "${TUNNEL_URL}/mini-app/" \
             > /dev/null; then
 
             echo "FAIL: Public Mini App is down."
@@ -553,7 +457,7 @@ for run in data.get("workflow_runs", []):
             HEALTH_OK=0
           fi
 
-          if [ "$HEALTH_OK" -ne 1 ]; then
+          if [ "${HEALTH_OK}" -ne 1 ]; then
 
             echo "=========================================="
             echo "HEALTH VERIFICATION FAILED"
@@ -566,15 +470,11 @@ for run in data.get("workflow_runs", []):
           echo "USERBOT HEALTH VERIFICATION PASSED"
           echo "=========================================="
 
-          # ========================================================
-          # DETERMINE OLDER RUNS
-          # ========================================================
-
           OLDER_RUNS=""
 
-          if [ -n "${PREVIOUS_RUN_ID:-}" ]; then
+          if [ -n "${PREVIOUS_RUN_ID}" ]; then
 
-            OLDER_RUNS="$PREVIOUS_RUN_ID"
+            OLDER_RUNS="${PREVIOUS_RUN_ID}"
 
           else
 
@@ -584,29 +484,25 @@ for run in data.get("workflow_runs", []):
 
           fi
 
-          # ========================================================
-          # CANCEL OLDER RUNS ONLY AFTER THIS RUN IS HEALTHY
-          # ========================================================
-
-          if [ -n "$OLDER_RUNS" ]; then
+          if [ -n "${OLDER_RUNS}" ]; then
 
             echo "=========================================="
             echo "Older active Userbot runs detected"
             echo "=========================================="
 
-            for OLD_RUN_ID in $OLDER_RUNS; do
+            for OLD_RUN_ID in ${OLDER_RUNS}; do
 
-              if [[ "$OLD_RUN_ID" =~ ^[0-9]+$ ]]; then
+              if [[ "${OLD_RUN_ID}" =~ ^[0-9]+$ ]]; then
 
-                OLD_STATUS="$(get_run_status "$OLD_RUN_ID")"
+                OLD_STATUS="$(get_run_status "${OLD_RUN_ID}")"
 
-                echo "Old run $OLD_RUN_ID status: $OLD_STATUS"
+                echo "Old run ${OLD_RUN_ID} status: ${OLD_STATUS}"
 
-                case "$OLD_STATUS" in
+                case "${OLD_STATUS}" in
 
                   queued|in_progress|waiting|requested|pending)
 
-                    cancel_run "$OLD_RUN_ID" || true
+                    cancel_run "${OLD_RUN_ID}" || true
 
                     ;;
 
@@ -618,43 +514,34 @@ for run in data.get("workflow_runs", []):
 
           fi
 
-          # ========================================================
-          # START 5H45 SERVICE TIMER
-          # ========================================================
-
           START_TIME="$(date +%s)"
 
           echo "=========================================="
           echo "USERBOT IS FULLY ONLINE"
           echo "=========================================="
+
           echo "Runtime target : 5 hours 45 minutes"
           echo "Runtime        : 20700 seconds"
-          echo "Run ID         : $CURRENT_RUN_ID"
-          echo "Tunnel         : $TUNNEL_URL"
-          echo "=========================================="
+          echo "Run ID         : ${CURRENT_RUN_ID}"
+          echo "Tunnel         : ${TUNNEL_URL}"
 
-          # ========================================================
-          # MAIN LOOP
-          # ========================================================
+          echo "=========================================="
 
           while true; do
 
             sleep 60
 
             NOW="$(date +%s)"
+
             ELAPSED=$((NOW - START_TIME))
 
             echo "------------------------------------------"
-            echo "Run ID : $CURRENT_RUN_ID"
+            echo "Run ID : ${CURRENT_RUN_ID}"
             echo "Runtime: ${ELAPSED}s / ${MAX_RUNTIME_SECONDS}s"
             echo "------------------------------------------"
 
-            # ======================================================
-            # 5H45 AUTOMATIC HANDOFF
-            # ======================================================
-
-            if [ "$ELAPSED" -ge "$MAX_RUNTIME_SECONDS" ] &&
-               [ "$HANDOFF_STARTED" -eq 0 ]; then
+            if [ "${ELAPSED}" -ge "${MAX_RUNTIME_SECONDS}" ] &&
+               [ "${HANDOFF_STARTED}" -eq 0 ]; then
 
               HANDOFF_STARTED=1
 
@@ -663,67 +550,63 @@ for run in data.get("workflow_runs", []):
               echo "=========================================="
               echo "5 HOURS 45 MINUTES REACHED"
               echo "=========================================="
+
               echo "Starting NEW replacement run"
-              echo "Old Run: $CURRENT_RUN_ID"
-              echo "Handoff: $NEXT_HANDOFF_ID"
+
+              echo "Old Run : ${CURRENT_RUN_ID}"
+              echo "Handoff : ${NEXT_HANDOFF_ID}"
+
               echo "=========================================="
 
               NEW_RUN_ID=""
 
               for ATTEMPT in 1 2 3 4 5; do
 
-                echo "Dispatch attempt $ATTEMPT / 5"
+                echo "Dispatch attempt ${ATTEMPT} / 5"
 
                 RESPONSE_FILE="/tmp/dispatch-response.json"
 
                 HTTP_CODE="$(
                   curl -sS \
-                    -o "$RESPONSE_FILE" \
+                    -o "${RESPONSE_FILE}" \
                     -w "%{http_code}" \
                     -X POST \
                     -H "Accept: application/vnd.github+json" \
-                    -H "Authorization: Bearer $GITHUB_TOKEN" \
+                    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                     -H "X-GitHub-Api-Version: 2026-03-10" \
                     -H "Content-Type: application/json" \
-                    "https://api.github.com/repos/$REPOSITORY/actions/workflows/$BOT_WORKFLOW/dispatches" \
+                    "https://api.github.com/repos/${REPOSITORY}/actions/workflows/${BOT_WORKFLOW}/dispatches" \
                     -d "{
-                      \"ref\": \"$BOT_BRANCH\",
+                      \"ref\": \"${BOT_BRANCH}\",
                       \"return_run_details\": true,
                       \"inputs\": {
-                        \"handoff_id\": \"$NEXT_HANDOFF_ID\",
-                        \"previous_run_id\": \"$CURRENT_RUN_ID\"
+                        \"handoff_id\": \"${NEXT_HANDOFF_ID}\",
+                        \"previous_run_id\": \"${CURRENT_RUN_ID}\"
                       }
                     }" \
                     || true
                 )"
 
-                echo "Dispatch HTTP status: $HTTP_CODE"
+                echo "Dispatch HTTP status: ${HTTP_CODE}"
 
-                if [ "$HTTP_CODE" = "200" ]; then
+                if [ "${HTTP_CODE}" = "200" ]; then
 
                   NEW_RUN_ID="$(
-                    python3 -c '
-import json
-import sys
-
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    print(data.get("workflow_run_id", ""))
-
-except Exception:
-    print("")
-' "$RESPONSE_FILE"
+                    jq -r '.workflow_run_id // empty' \
+                      "${RESPONSE_FILE}" \
+                      2>/dev/null \
+                      || true
                   )"
 
-                  if [[ "$NEW_RUN_ID" =~ ^[0-9]+$ ]]; then
+                  if [[ "${NEW_RUN_ID}" =~ ^[0-9]+$ ]]; then
 
                     echo "=========================================="
                     echo "NEW WORKFLOW CREATED"
                     echo "=========================================="
-                    echo "New Run ID: $NEW_RUN_ID"
-                    echo "Old Run ID: $CURRENT_RUN_ID"
+
+                    echo "New Run ID: ${NEW_RUN_ID}"
+                    echo "Old Run ID: ${CURRENT_RUN_ID}"
+
                     echo "=========================================="
 
                     break
@@ -731,19 +614,15 @@ except Exception:
 
                 fi
 
-                cat "$RESPONSE_FILE" || true
+                cat "${RESPONSE_FILE}" || true
 
-                if [ "$ATTEMPT" -lt 5 ]; then
+                if [ "${ATTEMPT}" -lt 5 ]; then
                   sleep 15
                 fi
 
               done
 
-              # ====================================================
-              # WAIT FOR NEW RUN
-              # ====================================================
-
-              if [[ "$NEW_RUN_ID" =~ ^[0-9]+$ ]]; then
+              if [[ "${NEW_RUN_ID}" =~ ^[0-9]+$ ]]; then
 
                 echo "Waiting for new runner..."
 
@@ -751,11 +630,11 @@ except Exception:
 
                 for CHECK in {1..90}; do
 
-                  NEW_STATUS="$(get_run_status "$NEW_RUN_ID")"
+                  NEW_STATUS="$(get_run_status "${NEW_RUN_ID}")"
 
-                  echo "New run status: $NEW_STATUS"
+                  echo "New run status: ${NEW_STATUS}"
 
-                  if [ "$NEW_STATUS" = "in_progress" ]; then
+                  if [ "${NEW_STATUS}" = "in_progress" ]; then
 
                     NEW_RUN_STARTED=1
 
@@ -766,7 +645,7 @@ except Exception:
                     break
                   fi
 
-                  if [ "$NEW_STATUS" = "completed" ]; then
+                  if [ "${NEW_STATUS}" = "completed" ]; then
 
                     echo "New run completed before becoming active."
 
@@ -777,33 +656,19 @@ except Exception:
 
                 done
 
-                # ==================================================
-                # DO NOT CANCEL OLD RUN HERE
-                #
-                # The NEW run receives previous_run_id.
-                #
-                # It will:
-                # 1. Start Cloudflare
-                # 2. Start Userbot
-                # 3. Verify Mini App
-                # 4. Verify public tunnel
-                # 5. Cancel THIS old run
-                #
-                # This guarantees new-first verification.
-                # ==================================================
-
-                if [ "$NEW_RUN_STARTED" -eq 1 ]; then
+                if [ "${NEW_RUN_STARTED}" -eq 1 ]; then
 
                   echo "New runner started."
+
                   echo "Waiting for new runner health verification."
 
                   for WAIT in {1..90}; do
 
-                    CURRENT_STATUS="$(get_run_status "$CURRENT_RUN_ID")"
+                    CURRENT_STATUS="$(get_run_status "${CURRENT_RUN_ID}")"
 
-                    echo "Current run status: $CURRENT_STATUS"
+                    echo "Current run status: ${CURRENT_STATUS}"
 
-                    if [ "$CURRENT_STATUS" = "completed" ]; then
+                    if [ "${CURRENT_STATUS}" = "completed" ]; then
 
                       echo "=========================================="
                       echo "OLD RUN WAS CANCELLED"
@@ -827,27 +692,26 @@ except Exception:
                 echo "=========================================="
                 echo "NEW RUN COULD NOT BE STARTED"
                 echo "=========================================="
+
                 echo "Current Userbot will continue."
+
                 echo "Watchdog can recover it."
+
                 echo "=========================================="
 
               fi
 
             fi
 
-            # ======================================================
-            # HEALTH CHECK
-            # ======================================================
-
             if [ -z "${CLOUDFLARED_PID:-}" ] ||
-               ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+               ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
 
               echo "Cloudflare is DOWN."
 
               WATCHDOG_FAILURES=$((WATCHDOG_FAILURES + 1))
 
             elif [ -z "${BOT_PID:-}" ] ||
-                 ! kill -0 "$BOT_PID" 2>/dev/null; then
+                 ! kill -0 "${BOT_PID}" 2>/dev/null; then
 
               echo "Telegram Userbot is DOWN."
 
@@ -864,7 +728,7 @@ except Exception:
 
             elif ! curl -fsS \
               --max-time 15 \
-              "$TUNNEL_URL/mini-app/" \
+              "${TUNNEL_URL}/mini-app/" \
               > /dev/null; then
 
               echo "Public Cloudflare Tunnel is DOWN."
@@ -879,11 +743,7 @@ except Exception:
 
             fi
 
-            # ======================================================
-            # LOCAL RECOVERY
-            # ======================================================
-
-            if [ "$WATCHDOG_FAILURES" -ge 2 ]; then
+            if [ "${WATCHDOG_FAILURES}" -ge 2 ]; then
 
               echo "=========================================="
               echo "SERVICE FAILURE DETECTED"
@@ -901,6 +761,7 @@ except Exception:
                 WATCHDOG_FAILURES=0
 
                 echo "Recovery failed."
+
                 echo "Current workflow remains alive."
 
               fi
