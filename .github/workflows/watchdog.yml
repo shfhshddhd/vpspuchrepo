@@ -1,7 +1,6 @@
 name: Telegram Userbot Watchdog
 
 on:
-
   workflow_dispatch:
 
   schedule:
@@ -20,49 +19,38 @@ permissions:
   contents: read
 
 jobs:
-
   watchdog:
     runs-on: ubuntu-22.04
 
     steps:
-
       - name: Check and recover Userbot
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-
         shell: bash
         run: |
           set -euo pipefail
 
           BOT_WORKFLOW="bot.yml"
           BOT_BRANCH="clean-main"
-
           CURRENT_WATCHDOG_RUN="${GITHUB_RUN_ID}"
 
           echo "=========================================="
           echo "Telegram Userbot Watchdog"
           echo "=========================================="
-
           echo "Repository : ${REPOSITORY}"
           echo "Workflow   : ${BOT_WORKFLOW}"
           echo "Branch     : ${BOT_BRANCH}"
           echo "Watchdog   : ${CURRENT_WATCHDOG_RUN}"
-
           echo "=========================================="
 
-          github_api_get() {
+          echo "Checking active Userbot runs..."
 
+          ACTIVE_RUNS="$(
             curl -fsSL \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${GITHUB_TOKEN}" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
-              "$@"
-          }
-
-          get_active_runs() {
-
-            github_api_get \
               "https://api.github.com/repos/${REPOSITORY}/actions/workflows/${BOT_WORKFLOW}/runs?branch=${BOT_BRANCH}&per_page=50" \
               | jq -r '
                   .workflow_runs[]
@@ -75,116 +63,74 @@ jobs:
                     )
                   | "\(.id) \(.status) \(.created_at)"
                 '
-          }
-
-          dispatch_userbot() {
-
-            local RESPONSE_FILE="/tmp/watchdog-dispatch.json"
-
-            echo "=========================================="
-            echo "Starting replacement Userbot"
-            echo "=========================================="
-
-            local HANDOFF_ID="watchdog-${CURRENT_WATCHDOG_RUN}-$(date +%s)"
-
-            local HTTP_CODE
-
-            HTTP_CODE="$(
-              curl -sS \
-                -o "${RESPONSE_FILE}" \
-                -w "%{http_code}" \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                -H "X-GitHub-Api-Version: 2026-03-10" \
-                -H "Content-Type: application/json" \
-                "https://api.github.com/repos/${REPOSITORY}/actions/workflows/${BOT_WORKFLOW}/dispatches" \
-                -d "{
-                  \"ref\": \"${BOT_BRANCH}\",
-                  \"return_run_details\": true,
-                  \"inputs\": {
-                    \"handoff_id\": \"${HANDOFF_ID}\",
-                    \"previous_run_id\": \"\"
-                  }
-                }" \
-                || true
-            )"
-
-            echo "Dispatch HTTP status: ${HTTP_CODE}"
-
-            if [ "${HTTP_CODE}" = "200" ]; then
-
-              NEW_RUN_ID="$(
-                jq -r '.workflow_run_id // empty' \
-                  "${RESPONSE_FILE}" \
-                  2>/dev/null \
-                  || true
-              )"
-
-              if [[ "${NEW_RUN_ID}" =~ ^[0-9]+$ ]]; then
-
-                echo "=========================================="
-                echo "Replacement Userbot started"
-                echo "=========================================="
-
-                echo "New Run ID: ${NEW_RUN_ID}"
-
-                echo "=========================================="
-
-                return 0
-              fi
-
-            fi
-
-            echo "=========================================="
-            echo "Replacement dispatch failed"
-            echo "=========================================="
-
-            cat "${RESPONSE_FILE}" || true
-
-            return 1
-          }
-
-          echo "Checking active Userbot runs..."
-
-          ACTIVE_RUNS="$(
-            get_active_runs || true
           )"
 
           if [ -n "${ACTIVE_RUNS}" ]; then
-
             echo "=========================================="
-            echo "Active Userbot run(s) found"
+            echo "ACTIVE USERBOT RUN FOUND"
             echo "=========================================="
-
             echo "${ACTIVE_RUNS}"
-
             echo "=========================================="
             echo "No replacement required."
             echo "=========================================="
-
             exit 0
-
           fi
 
           echo "=========================================="
           echo "NO ACTIVE USERBOT RUN FOUND"
           echo "=========================================="
+          echo "Starting replacement Userbot..."
 
-          echo "A replacement is required."
+          HANDOFF_ID="watchdog-${CURRENT_WATCHDOG_RUN}-$(date +%s)"
+          RESPONSE_FILE="/tmp/watchdog-dispatch.json"
 
-          if dispatch_userbot; then
+          HTTP_CODE="$(
+            curl -sS \
+              -o "${RESPONSE_FILE}" \
+              -w "%{http_code}" \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${REPOSITORY}/actions/workflows/${BOT_WORKFLOW}/dispatches" \
+              -d "{
+                \"ref\": \"${BOT_BRANCH}\",
+                \"return_run_details\": true,
+                \"inputs\": {
+                  \"handoff_id\": \"${HANDOFF_ID}\",
+                  \"previous_run_id\": \"\"
+                }
+              }" \
+              || true
+          )"
 
-            echo "=========================================="
-            echo "WATCHDOG RECOVERY SUCCESSFUL"
-            echo "=========================================="
+          echo "Dispatch HTTP status: ${HTTP_CODE}"
 
-            exit 0
+          if [ "${HTTP_CODE}" = "200" ]; then
+            NEW_RUN_ID="$(
+              jq -r '.workflow_run_id // empty' \
+                "${RESPONSE_FILE}" \
+                2>/dev/null \
+                || true
+            )"
 
+            if [[ "${NEW_RUN_ID}" =~ ^[0-9]+$ ]]; then
+              echo "=========================================="
+              echo "WATCHDOG RECOVERY SUCCESSFUL"
+              echo "=========================================="
+              echo "New Userbot Run ID: ${NEW_RUN_ID}"
+              echo "Handoff ID: ${HANDOFF_ID}"
+              echo "=========================================="
+              exit 0
+            fi
           fi
 
           echo "=========================================="
           echo "WATCHDOG RECOVERY FAILED"
+          echo "=========================================="
+          echo "GitHub API response:"
+          cat "${RESPONSE_FILE}" || true
           echo "=========================================="
 
           exit 1
