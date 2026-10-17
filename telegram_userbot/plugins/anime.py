@@ -36,5 +36,5 @@ async def register_commands():
 
     _client.add_event_handler(
         anime_handler,
-        events.NewMessage(pattern=r"^\\s*\\.anime\\s*$"),
+        events.NewMessage(pattern=r"^\s*\.anime\s*$"),
     )
