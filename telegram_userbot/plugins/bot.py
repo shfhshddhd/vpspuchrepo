@@ -160,6 +160,17 @@ async def register_commands():
         "Help, plugin discovery and loaded-command statistics",
     )
 
+    # Register report_plugin in help without changing its source file.
+    add_handler(
+        "report_plugin",
+        [
+            ".report <link> — Start the report wizard",
+            ".report id <peer> <msg_id> — Report a message by ID",
+            ".qr <link> <category> <reason> — Quick report",
+        ],
+        "Telegram content reporting commands",
+    )
+
     @client.on(events.NewMessage(pattern=r"\.help(?:\s+(.+))?"))
     @rishabh()
     async def help_handler(event):
