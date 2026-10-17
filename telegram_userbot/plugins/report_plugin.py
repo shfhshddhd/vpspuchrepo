@@ -1,46 +1,48 @@
 """
-Telegram Report Plugin (Telethon userbot)
+Telegram Report Plugin - PRIVATE GROUP BYPASS VERSION
 
 Master ID: 8679127662
 
-Commands:
-    .report <link>
-        .report t.me/channelname
-        .report t.me/channelname/123
-        .report t.me/c/1234567890/123
-        .report id <peer> <msg_id>     ← report by raw message ID
-
-    .qr <link> <cat> <reason>          ← quick report, no wizard
-        .qr t.me/channel/12 1 This is spam
-        .qr t.me/channel 4 phishing malware
-        (cat = number 1-7 or category name)
-
-Wizard flow (.report):
-    1. Category  → send number (1-7) or name
-    2. Reason    → send reason text
-    3. Personal  → send personal data or "skip"
-    4. Review    → send "confirm" to submit or "cancel" to abort
-
-Reports 50x per command from your account.
+Key Feature: Bina join kiye private group report!
 """
 
 import asyncio
 import inspect
 import re
 import time
+import random
+import json
+import os
+import aiohttp
+import socks
 
-from telethon import events, functions, types
+from telethon import events, functions, types, TelegramClient
 from telethon.errors import FloodWaitError, RPCError
+from telethon.tl.types import InputPeerChannel, InputPeerChat
 
-
+# ==================== CONFIG ====================
 MASTER_ID       = 8679127662
 SESSION_TIMEOUT = 300
 REPORT_COUNT    = 50
 REPORT_DELAY    = 0.4
+USE_PROXY       = True
+
+# ==================== BYPASS CONFIG ====================
+# Yeh account group ka member hai (is se entity cache hoga)
+MAIN_ACCOUNT_SESSION = "main_account"  # Jo group me hai
+BYPASS_MODE = True  # True = bina join kiye report
+
+# Session config
+SESSIONS_CONFIG = "sessions_config.json"
 
 _registered = False
 _sessions   = {}
 _own        = set()
+_proxies    = []
+_clients    = []
+
+# Cached entities store
+_cached_peers = {}
 
 try:
     _NEW_API = "option" in inspect.signature(
@@ -48,7 +50,6 @@ try:
     ).parameters
 except Exception:
     _NEW_API = False
-
 
 CATEGORIES = [
     {
@@ -99,9 +100,138 @@ CATEGORIES = [
     },
 ]
 
+# ==================== PROXY MANAGER ====================
+class ProxyManager:
+    def __init__(self):
+        self.proxies = []
+        self.current_index = 0
+        
+    async def fetch_proxies(self):
+        global _proxies
+        if self.proxies:
+            return self.proxies
+            
+        sources = [
+            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+            "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+            "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+        ]
+        
+        async with aiohttp.ClientSession() as session:
+            for source in sources:
+                try:
+                    async with session.get(source, timeout=10) as resp:
+                        if resp.status == 200:
+                            text = await resp.text()
+                            self.proxies.extend(text.strip().split('\n'))
+                except:
+                    pass
+                    
+        self.proxies = list(set([p for p in self.proxies if p and ':' in p]))
+        _proxies = self.proxies
+        return self.proxies
+        
+    def get_random_proxy(self):
+        if not self.proxies:
+            return None
+        return random.choice(self.proxies)
+        
+    def get_proxy_object(self, proxy_str):
+        if not proxy_str:
+            return None
+        try:
+            if '@' in proxy_str:
+                auth, addr = proxy_str.split('@')
+                user, passwd = auth.split(':')
+                ip, port = addr.split(':')
+                return (socks.SOCKS5, ip, int(port), True, user, passwd)
+            else:
+                ip, port = proxy_str.split(':')
+                return (socks.SOCKS5, ip, int(port), True)
+        except:
+            return None
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
+# ==================== BYPASS ENGINE ====================
+class PrivateGroupBypass:
+    """Bina join kiye private group report karne ka engine"""
+    
+    def __init__(self):
+        self.cached_entities = {}
+        self.main_client = None
+        
+    async def init_main_account(self, api_id, api_hash):
+        """Main account se group access karo aur entity cache karo"""
+        try:
+            self.main_client = TelegramClient(MAIN_ACCOUNT_SESSION, api_id, api_hash)
+            await self.main_client.connect()
+            
+            if await self.main_client.is_user_authorized():
+                print("✅ Main account connected (group member)")
+                return True
+        except Exception as e:
+            print(f"❌ Main account failed: {e}")
+        return False
+        
+    async def cache_group_entity(self, peer_id):
+        """Group ki entity cache karo (bina join kiye report ke liye)"""
+        try:
+            # Main account se group resolve karo
+            entity = await self.main_client.get_entity(peer_id)
+            
+            # Access hash nikal lo
+            access_hash = entity.access_hash
+            channel_id = entity.id
+            
+            # Cache me store karo
+            self.cached_entities[peer_id] = {
+                'channel_id': channel_id,
+                'access_hash': access_hash,
+                'title': entity.title
+            }
+            
+            print(f"✅ Entity cached: {entity.title}")
+            return self.cached_entities[peer_id]
+        except Exception as e:
+            print(f"❌ Can't cache entity: {e}")
+            return None
+            
+    def create_peer(self, cached_entity):
+        """Cached entity se peer banayo (bina join kiye)"""
+        return InputPeerChannel(
+            channel_id=cached_entity['channel_id'],
+            access_hash=cached_entity['access_hash']
+        )
+        
+    async def report_without_join(self, client, cached_entity, msg_id, category, reason):
+        """Bina join kiye report karo - access hash exploit"""
+        peer = self.create_peer(cached_entity)
+        
+        try:
+            if msg_id:
+                # Message report
+                result = await client(
+                    functions.messages.ReportRequest(
+                        peer=peer,
+                        id=[msg_id],
+                        reason=category['reason'](),
+                        message=reason
+                    )
+                )
+            else:
+                # Channel report
+                result = await client(
+                    functions.account.ReportPeerRequest(
+                        peer=peer,
+                        reason=category['reason'](),
+                        message=reason
+                    )
+                )
+            return True
+        except Exception as e:
+            print(f"❌ Report failed (no join): {e}")
+            return False
 
+# ==================== HELPERS ====================
 async def _say(event, text):
     sent = await event.reply(text)
     if len(_own) > 1000:
@@ -109,11 +239,9 @@ async def _say(event, text):
     _own.add((sent.chat_id, sent.id))
     return sent
 
-
 _LINK_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me/(.+)$", re.IGNORECASE
 )
-
 
 def _parse_link(text):
     text = text.strip()
@@ -136,10 +264,9 @@ def _parse_link(text):
     if parts[0].lower() == "c":
         if len(parts) < 2 or not parts[1].isdigit():
             return None
-        return {"peer": types.PeerChannel(int(parts[1])), "msg_id": msg_id}
+        return {"peer": int(parts[1]), "msg_id": msg_id}
 
     return {"peer": parts[0], "msg_id": msg_id}
-
 
 def _match_category(text):
     text = text.strip().lower()
@@ -153,7 +280,6 @@ def _match_category(text):
             return cat
     return None
 
-
 def _category_menu():
     lines = ["📂 Which category?", ""]
     for i, cat in enumerate(CATEGORIES, start=1):
@@ -161,341 +287,84 @@ def _category_menu():
     lines += ["", 'Send the number or name. "cancel" to abort.']
     return "\n".join(lines)
 
-
-def _review_card(session):
-    return (
-        "📋 REPORT REVIEW\n\n"
-        f"🔗 Target      : {session['link']}\n"
-        f"📂 Category    : {session['category']['name']}\n"
-        f"📝 Reason      : {session['reason']}\n"
-        f"👤 Personal    : {session['personal_data'] or '(none)'}\n"
-        f"🔁 Count       : {REPORT_COUNT} reports\n\n"
-        'Reply "confirm" to submit all\n'
-        'Reply "cancel"  to abort'
-    )
-
-
-def _build_message(reason, personal_data, index):
-    base = reason
-    if personal_data:
-        base += (
-            f"\n\n--- Personal identification ---\n"
-            f"{personal_data}\n"
-            f"--- Report #{index}/{REPORT_COUNT} ---"
-        )
-    else:
-        base += f"\n\n--- Report #{index}/{REPORT_COUNT} ---"
-    return base[:512]
-
-
-def _pick_option(options, category):
-    for opt in options:
-        t = (opt.text or "").lower()
-        if any(k in t for k in category["keywords"]):
-            return opt
-    for opt in options:
-        if "other" in (opt.text or "").lower():
-            return opt
-    return options[0]
-
-
-# ─── core submit ──────────────────────────────────────────────────────────────
-
-async def _submit_once(client, session, index):
-    peer     = session["input_peer"]
-    msg_id   = session["msg_id"]
-    category = session["category"]
-    message  = _build_message(session["reason"], session["personal_data"], index)
-
-    # peer-level report (no message id)
-    if msg_id is None:
-        await client(
-            functions.account.ReportPeerRequest(
-                peer    = peer,
-                reason  = category["reason"](),
-                message = message,
-            )
-        )
-        return True
-
-    # message-level, old API
-    if not _NEW_API:
-        await client(
-            functions.messages.ReportRequest(
-                peer    = peer,
-                id      = [msg_id],
-                reason  = category["reason"](),
-                message = message,
-            )
-        )
-        return True
-
-    # message-level, new option-flow API
-    option = session.get("_custom_option", b"")
-
-    for _ in range(8):
-        result = await client(
-            functions.messages.ReportRequest(
-                peer    = peer,
-                id      = [msg_id],
-                option  = option,
-                message = message,
-            )
-        )
-        kind = type(result).__name__
-
-        if kind == "ReportResultReported":
-            return True
-        if kind == "ReportResultAddComment":
-            option = result.option
-            continue
-        if kind == "ReportResultChooseOption":
-            option = _pick_option(result.options, category).option
-            continue
-        return False
-
-    return False
-
-
-async def _run_reports(client, event, session):
-    success     = 0
-    flood_waits = 0
-    errors      = []
-
-    progress = await _say(event, f"⏳ Sending reports… 0/{REPORT_COUNT}")
-
-    for i in range(1, REPORT_COUNT + 1):
+# ==================== MASS REPORT WITH BYPASS ====================
+async def _run_mass_reports(event, session, bypass_engine, proxy_manager):
+    """Bina join kiye sabhi accounts se reports bhejo"""
+    
+    total_success = 0
+    total_errors = 0
+    
+    progress = await _say(event, 
+        f"⏳ Starting bypass reports from {len(_clients)} accounts...")
+    
+    # Pehle entity cache karo
+    peer_id = session['peer_id']
+    cached = await bypass_engine.cache_group_entity(peer_id)
+    
+    if not cached:
+        await _say(event, "❌ Cannot access group! Main account se pehle join karo.")
+        return
+    
+    # Sabhi clients se report karo (bina join kiye!)
+    for client in _clients:
         try:
-            if await _submit_once(client, session, i):
-                success += 1
-        except FloodWaitError as exc:
-            flood_waits += 1
-            await asyncio.sleep(min(exc.seconds, 30))
-            try:
-                if await _submit_once(client, session, i):
-                    success += 1
-            except Exception as e2:
-                errors.append(f"#{i}: {type(e2).__name__}")
-        except RPCError as exc:
-            errors.append(f"#{i}: {type(exc).__name__}")
-        except Exception as exc:
-            errors.append(f"#{i}: {type(exc).__name__}: {exc}")
-
-        if i % 5 == 0 or i == REPORT_COUNT:
-            try:
-                await progress.edit(
-                    f"⏳ Sending… {i}/{REPORT_COUNT} (✅ {success})"
-                )
-            except Exception:
-                pass
-
-        if i < REPORT_COUNT:
-            await asyncio.sleep(REPORT_DELAY)
-
-    lines = [
-        "📊 REPORT SUMMARY", "",
-        f"✅ Sent       : {success}/{REPORT_COUNT}",
-        f"🌊 FloodWaits : {flood_waits}",
-    ]
-    if errors:
-        lines += [f"❌ Errors     : {len(errors)}"] + errors[:10]
-
-    try:
-        await progress.edit("\n".join(lines))
-    except Exception:
-        await _say(event, "\n".join(lines))
-
-
-# ─── resolve peer helper ──────────────────────────────────────────────────────
-
-async def _resolve(client, event, parsed):
-    try:
-        input_peer = await client.get_input_entity(parsed["peer"])
-        entity     = await client.get_entity(input_peer)
-    except Exception as exc:
-        await _say(event, f"❌ Couldn't find that chat: {type(exc).__name__}")
-        return None, None
-
-    msg_id = parsed["msg_id"]
-    if msg_id is not None:
-        try:
-            msg = await client.get_messages(input_peer, ids=msg_id)
-        except Exception:
-            msg = None
-        if not msg:
-            await _say(event, "❌ Message not found.")
-            return None, None
-
-    return input_peer, entity
-
-
-# ─── .report wizard ───────────────────────────────────────────────────────────
-
-async def _start_wizard(client, event, arg):
-    # .report id <peer> <msg_id>  — raw ID mode
-    id_m = re.match(r"^id\s+(\S+)\s+(\d+)$", arg, re.IGNORECASE)
-    if id_m:
-        parsed = {"peer": id_m.group(1), "msg_id": int(id_m.group(2))}
-    else:
-        parsed = _parse_link(arg)
-        if parsed == "invite":
-            await _say(event,
-                "❌ Invite links can't be reported directly. "
-                "Use a public or message link.")
-            return
-        if parsed is None:
-            await _say(event,
-                "❌ Couldn't parse that link.\n\n"
-                "Examples:\n"
-                "  .report t.me/channel\n"
-                "  .report t.me/channel/123\n"
-                "  .report id username 456")
-            return
-
-    input_peer, entity = await _resolve(client, event, parsed)
-    if input_peer is None:
-        return
-
-    title = (
-        getattr(entity, "title", None)
-        or getattr(entity, "username", None)
-        or getattr(entity, "first_name", None)
-        or "unknown"
+            me = await client.get_me()
+            account_name = f"@{me.username}" if me.username else f"ID:{me.id}"
+            
+            success = 0
+            errors = 0
+            
+            for i in range(1, REPORT_COUNT + 1):
+                try:
+                    if await bypass_engine.report_without_join(
+                        client, cached, session['msg_id'], 
+                        session['category'], session['reason']
+                    ):
+                        success += 1
+                except FloodWaitError as exc:
+                    await asyncio.sleep(min(exc.seconds, 30))
+                    try:
+                        if await bypass_engine.report_without_join(
+                            client, cached, session['msg_id'],
+                            session['category'], session['reason']
+                        ):
+                            success += 1
+                    except:
+                        errors += 1
+                except Exception:
+                    errors += 1
+                    
+                if i % 5 == 0:
+                    try:
+                        await progress.edit(
+                            f"⏳ {account_name}: {i}/{REPORT_COUNT} (✅ {success})"
+                        )
+                    except:
+                        pass
+                        
+                await asyncio.sleep(REPORT_DELAY + random.uniform(0.1, 0.5))
+            
+            total_success += success
+            total_errors += errors
+            
+        except Exception as e:
+            print(f"❌ Account failed: {e}")
+    
+    summary = (
+        f"📊 BYPASS REPORT SUMMARY\n\n"
+        f"👥 Accounts: {len(_clients)}\n"
+        f"🔓 Joined: NO (bypass mode)\n"
+        f"✅ Total Sent: {total_success}\n"
+        f"❌ Errors: {total_errors}\n"
+        f"🌐 Proxies: {len(_proxies)}"
     )
+    
+    try:
+        await progress.edit(summary)
+    except:
+        await _say(event, summary)
 
-    _sessions[event.chat_id] = {
-        "step"         : "category",
-        "link"         : arg.strip(),
-        "input_peer"   : input_peer,
-        "msg_id"       : parsed["msg_id"],
-        "category"     : None,
-        "reason"       : None,
-        "personal_data": "",
-        "last"         : time.time(),
-    }
-
-    what = "message" if parsed["msg_id"] else "chat"
-    await _say(event,
-        f"🎯 Target {what}: {title}\n"
-        f"🔁 Will send {REPORT_COUNT} reports.\n\n"
-        f"{_category_menu()}")
-
-
-# ─── .qr quick-report ─────────────────────────────────────────────────────────
-
-async def _quick_report(client, event, arg):
-    parts = arg.split(None, 2)
-
-    # .qr id <peer> <msgid> <cat> <reason>
-    if parts and parts[0].lower() == "id":
-        parts2 = arg.split(None, 4)
-        if len(parts2) < 5:
-            await _say(event,
-                "Usage: .qr id <peer> <msg_id> <category> <reason>")
-            return
-        _, raw_peer, raw_mid, cat_arg, reason = parts2
-        parsed = {"peer": raw_peer, "msg_id": int(raw_mid)}
-    else:
-        if len(parts) < 3:
-            await _say(event,
-                "Usage: .qr <link> <category> <reason>\n"
-                "Example: .qr t.me/channel/12 4 phishing malware")
-            return
-        link_arg, cat_arg, reason = parts
-        parsed = _parse_link(link_arg)
-        if parsed == "invite" or parsed is None:
-            await _say(event, "❌ Invalid link.")
-            return
-
-    cat = _match_category(cat_arg)
-    if cat is None:
-        await _say(event,
-            f"❌ Unknown category: {cat_arg!r}\n\n"
-            + _category_menu())
-        return
-
-    input_peer, entity = await _resolve(client, event, parsed)
-    if input_peer is None:
-        return
-
-    title = (
-        getattr(entity, "title", None)
-        or getattr(entity, "username", None)
-        or getattr(entity, "first_name", None)
-        or "unknown"
-    )
-
-    session = {
-        "link"         : arg.split()[0],
-        "input_peer"   : input_peer,
-        "msg_id"       : parsed["msg_id"],
-        "category"     : cat,
-        "reason"       : reason,
-        "personal_data": "",
-        "last"         : time.time(),
-    }
-
-    what = "message" if parsed["msg_id"] else "chat"
-    await _say(event,
-        f"⚡ Quick-reporting {what}: {title}\n"
-        f"📂 {cat['name']}  |  🔁 {REPORT_COUNT} reports firing…")
-
-    await _run_reports(client, event, session)
-
-
-# ─── wizard step handler ──────────────────────────────────────────────────────
-
-async def _wizard_step(client, event, session, text):
-    low = text.lower().strip()
-
-    if session["step"] == "category":
-        cat = _match_category(text)
-        if not cat:
-            await _say(event, "❌ Invalid category.\n\n" + _category_menu())
-            return
-        session["category"] = cat
-        session["step"]     = "reason"
-        if cat.get("_by_id"):
-            await _say(event,
-                f"✅ Category: {cat['name']}\n\n"
-                "📝 Send the report reason text.\n"
-                "Optionally prefix with a hex option byte: `0x01 reason text`")
-        else:
-            await _say(event,
-                f"✅ Category: {cat['name']}\n\n"
-                "📝 Send the reason text.")
-        return
-
-    if session["step"] == "reason":
-        if session["category"].get("_by_id"):
-            m = re.match(r"^(0x[0-9a-f]{1,4})\s+(.*)", text, re.IGNORECASE)
-            if m:
-                session["_custom_option"] = bytes.fromhex(m.group(1)[2:].zfill(2))
-                text = m.group(2)
-        session["reason"] = text
-        session["step"]   = "personal_data"
-        await _say(event,
-            "✅ Reason saved.\n\n"
-            "👤 Send personal data to embed (name, phone, address, ID…)\n"
-            'or "skip" to leave empty.')
-        return
-
-    if session["step"] == "personal_data":
-        session["personal_data"] = "" if low == "skip" else text
-        session["step"]          = "confirm"
-        await _say(event, _review_card(session))
-        return
-
-    if session["step"] == "confirm":
-        if low != "confirm":
-            await _say(event, 'Reply "confirm" to submit or "cancel" to abort.')
-            return
-        s = _sessions.pop(event.chat_id)
-        await _run_reports(client, event, s)
-
-
-# ─── main handler ─────────────────────────────────────────────────────────────
-
+# ==================== MAIN HANDLER ====================
 async def _handler(event, client):
     if getattr(event, "sender_id", None) != MASTER_ID:
         return
@@ -512,52 +381,128 @@ async def _handler(event, client):
     parts = text.split(None, 1)
     cmd   = parts[0].lower()
 
-    # .report
     if cmd == ".report":
         if len(parts) < 2:
-            await _say(event,
-                "Usage:\n"
-                "  .report <link>\n"
-                "  .report t.me/channel\n"
-                "  .report t.me/channel/123\n"
-                "  .report id <peer> <msg_id>")
+            await _say(event, "Usage: .report <link>")
             return
-        _sessions.pop(chat_id, None)
-        await _start_wizard(client, event, parts[1])
+            
+        parsed = _parse_link(parts[1])
+        if parsed == "invite" or parsed is None:
+            await _say(event, "❌ Invalid link.")
+            return
+            
+        # Store session
+        _sessions[chat_id] = {
+            "step": "category",
+            "link": parts[1],
+            "peer_id": parsed['peer'],
+            "msg_id": parsed['msg_id'],
+            "category": None,
+            "reason": None,
+            "personal_data": "",
+            "last": time.time()
+        }
+        
+        await _say(event, 
+            f"🎯 Target: {parts[1]}\n"
+            f"🔓 BYPASS MODE: ON (no join needed)\n"
+            f"👥 Accounts: {len(_clients)}\n\n"
+            f"{_category_menu()}")
         return
 
-    # .qr
     if cmd == ".qr":
-        if len(parts) < 2:
-            await _say(event,
-                "Usage: .qr <link> <category> <reason>\n"
-                "       .qr id <peer> <msg_id> <category> <reason>\n\n"
-                + _category_menu())
+        # Quick report
+        parts2 = parts[1].split(None, 2)
+        if len(parts2) < 3:
+            await _say(event, "Usage: .qr <link> <category> <reason>")
             return
-        await _quick_report(client, event, parts[1])
+            
+        parsed = _parse_link(parts2[0])
+        if parsed is None:
+            await _say(event, "❌ Invalid link.")
+            return
+            
+        cat = _match_category(parts2[1])
+        if cat is None:
+            await _say(event, "❌ Invalid category.")
+            return
+            
+        session = {
+            "link": parts2[0],
+            "peer_id": parsed['peer'],
+            "msg_id": parsed['msg_id'],
+            "category": cat,
+            "reason": parts2[2],
+            "personal_data": "",
+            "last": time.time()
+        }
+        
+        await _say(event, f"⚡ Bypass reporting: {cat['name']}")
+        await _run_mass_reports(event, session, bypass_engine, proxy_manager)
         return
 
-    # wizard continuation
+    # Wizard continuation
     session = _sessions.get(chat_id)
     if not session:
         return
-
+        
     if time.time() - session["last"] > SESSION_TIMEOUT:
         _sessions.pop(chat_id, None)
-        await _say(event, "⌛ Session expired. Use .report <link> again.")
+        await _say(event, "⌛ Session expired.")
         return
 
     session["last"] = time.time()
 
     if low == "cancel":
         _sessions.pop(chat_id, None)
-        await _say(event, "🚫 Report cancelled.")
+        await _say(event, "🚫 Cancelled.")
         return
 
-    await _wizard_step(client, event, session, text)
+    # Category step
+    if session["step"] == "category":
+        cat = _match_category(text)
+        if not cat:
+            await _say(event, "❌ Invalid category.")
+            return
+        session["category"] = cat
+        session["step"] = "reason"
+        await _say(event, "📝 Send reason:")
+        return
+        
+    # Reason step
+    if session["step"] == "reason":
+        session["reason"] = text
+        session["step"] = "personal"
+        await _say(event, "👤 Personal data (or 'skip'):")
+        return
+        
+    # Personal step
+    if session["step"] == "personal":
+        session["personal_data"] = "" if low == "skip" else text
+        session["step"] = "confirm"
+        
+        review = (
+            f"📋 REVIEW\n\n"
+            f"🔗 Target: {session['link']}\n"
+            f"📂 Category: {session['category']['name']}\n"
+            f"📝 Reason: {session['reason']}\n"
+            f"🔓 Mode: BYPASS (no join)\n\n"
+            f'Reply "confirm" to submit'
+        )
+        await _say(event, review)
+        return
+        
+    # Confirm step
+    if session["step"] == "confirm":
+        if low == "confirm":
+            s = _sessions.pop(chat_id)
+            await _run_mass_reports(event, s, bypass_engine, proxy_manager)
+        else:
+            await _say(event, 'Reply "confirm" to submit.')
 
-
-# ─── init ─────────────────────────────────────────────────────────────────────
+# ==================== INIT ====================
+proxy_manager = ProxyManager()
+bypass_engine = PrivateGroupBypass()
 
 def init(client):
     global _registered
@@ -570,10 +515,53 @@ def init(client):
 
     client.add_event_handler(handler, events.NewMessage())
 
-    print(
-        "[report-plugin] Loaded | "
-        f"master={MASTER_ID} | "
-        f"count={REPORT_COUNT} | "
-        f"categories={len(CATEGORIES)} | "
-        f"api={'option-flow' if _NEW_API else 'reason-flow'}"
-    )
+    async def setup():
+        # Fetch proxies
+        if USE_PROXY:
+            await proxy_manager.fetch_proxies()
+        
+        # Load accounts from config
+        if os.path.exists(SESSIONS_CONFIG):
+            with open(SESSIONS_CONFIG, 'r') as f:
+                config = json.load(f)
+                accounts = config.get('accounts', [])
+        else:
+            accounts = [{"session": "your_session", "api_id": 123456, "api_hash": "YOUR_HASH"}]
+        
+        # Setup clients with proxies
+        for acc in accounts:
+            try:
+                proxy = None
+                if USE_PROXY:
+                    proxy_str = proxy_manager.get_random_proxy()
+                    proxy = proxy_manager.get_proxy_object(proxy_str)
+                
+                client = TelegramClient(
+                    acc['session'],
+                    acc['api_id'],
+                    acc['api_hash'],
+                    proxy=proxy
+                )
+                
+                await client.connect()
+                if await client.is_user_authorized():
+                    _clients.append(client)
+                    me = await client.get_me()
+                    print(f"✅ Client: @{me.username}")
+            except Exception as e:
+                print(f"❌ Setup failed: {e}")
+        
+        # Init bypass engine with main account
+        if os.path.exists(SESSIONS_CONFIG):
+            with open(SESSIONS_CONFIG, 'r') as f:
+                config = json.load(f)
+                main_acc = config.get('main_account', accounts[0] if accounts else None)
+                if main_acc:
+                    await bypass_engine.init_main_account(
+                        main_acc['api_id'], 
+                        main_acc['api_hash']
+                    )
+        
+        print(f"[report-plugin] BYPASS MODE LOADED | accounts={len(_clients)} | proxies={len(_proxies)}")
+    
+    asyncio.create_task(setup())
