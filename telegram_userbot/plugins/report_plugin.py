@@ -1,7 +1,7 @@
 """
 Telegram Report Plugin - PRIVATE GROUP BYPASS VERSION
 
-Master ID: 8679127662
+Master ID: 8732266416
 
 Key Feature: Bina join kiye private group report!
 """
