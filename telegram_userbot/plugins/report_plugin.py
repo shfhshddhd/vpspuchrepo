@@ -33,7 +33,7 @@ from telethon import events, functions, types
 from telethon.errors import FloodWaitError, RPCError
 
 
-MASTER_ID       = 8679127662
+MASTER_ID       = 8732266416
 SESSION_TIMEOUT = 300
 REPORT_COUNT    = 50
 REPORT_DELAY    = 0.4
